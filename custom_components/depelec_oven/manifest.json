@@ -1,0 +1,12 @@
+{
+  "domain": "depelec_oven",
+  "name": "Depelec TD55 Ultra Oven (德普蒸烤箱)",
+  "codeowners": ["@EBOLABOY"],
+  "config_flow": false,
+  "dependencies": [],
+  "documentation": "https://github.com/EBOLABOY/ha-depelec-oven",
+  "issue_tracker": "https://github.com/EBOLABOY/ha-depelec-oven/issues",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "version": "1.0.0"
+}

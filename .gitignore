@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.tmp
+depelec_oven_auth.json
+.storage/

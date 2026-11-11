@@ -1,0 +1,6 @@
+{
+  "name": "Depelec TD55 Ultra Oven (德普蒸烤箱)",
+  "content_in_root": false,
+  "render_readme": true,
+  "homeassistant": "2024.1.0"
+}
