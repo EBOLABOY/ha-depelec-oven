@@ -1,0 +1,94 @@
+start_cooking:
+  name: 一键启动烹饪
+  description: 按指定模式、温度、时长、蒸汽/湿度档位及预约时间一键启动德普 TD55 Ultra 蒸烤箱。
+  fields:
+    mode:
+      name: 烹饪模式
+      description: 选择 22 种预设烹饪模式之一。
+      required: true
+      example: "普通蒸"
+      selector:
+        select:
+          options:
+            - "普通蒸"
+            - "高温蒸"
+            - "烘焙烤"
+            - "风扇烤"
+            - "快烧烤"
+            - "加湿烤"
+            - "慢烧烤"
+            - "风焙烤"
+            - "焙烤"
+            - "煎烤"
+            - "空气炸"
+            - "串烤"
+            - "蒸汽烤"
+            - "炖煮"
+            - "蒸烤同烹"
+            - "烘干"
+            - "保洁"
+            - "解冻"
+            - "发酵"
+            - "保温"
+            - "复热"
+            - "清洁"
+    temperature:
+      name: 上管/主腔温度
+      description: 设定目标温度（省略时使用该模式官方默认温度，自动限制在模式允许范围内）。
+      required: false
+      example: 100
+      selector:
+        number:
+          min: 30
+          max: 230
+          step: 1
+          unit_of_measurement: "°C"
+          mode: box
+    down_temperature:
+      name: 下管温度
+      description: 仅对 9 种上下管独立控温模式生效；省略时默认与上管温度一致。
+      required: false
+      example: 180
+      selector:
+        number:
+          min: 30
+          max: 230
+          step: 1
+          unit_of_measurement: "°C"
+          mode: box
+    duration:
+      name: 烹饪时长
+      description: 设定烹饪持续时间（省略时使用该模式官方默认时长）。
+      required: false
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 360
+          step: 1
+          unit_of_measurement: "min"
+          mode: box
+    steam_gear:
+      name: 蒸汽/湿度档位
+      description: 仅对普通蒸、高温蒸（蒸汽档位）和蒸汽烤（湿度档位）生效：1=低档，2=中档，3=高档。
+      required: false
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 3
+          step: 1
+          mode: slider
+    appointment_time:
+      name: 预约延迟时间
+      description: 延迟多少分钟后开始烹饪（0 表示立即启动，最大 1440 分钟即 24 小时）。
+      required: false
+      default: 0
+      example: 0
+      selector:
+        number:
+          min: 0
+          max: 1440
+          step: 1
+          unit_of_measurement: "min"
+          mode: box

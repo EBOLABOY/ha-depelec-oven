@@ -1,4 +1,4 @@
-"""Number platform for Depelec TD55 Ultra Oven target temperature and duration."""
+"""Number platform for Depelec TD55 Ultra Oven target temperature, duration & appointment."""
 from __future__ import annotations
 
 from homeassistant.components.number import NumberEntity, NumberMode
@@ -18,6 +18,7 @@ def _build_entities(coordinator: DepelecOvenCoordinator) -> list[NumberEntity]:
         DepelecTargetTempNumber(coordinator),
         DepelecDownTargetTempNumber(coordinator),
         DepelecWorkTimeNumber(coordinator),
+        DepelecAppointmentTimeNumber(coordinator),
     ]
 
 
@@ -53,13 +54,14 @@ class DepelecBaseNumber(CoordinatorEntity[DepelecOvenCoordinator], NumberEntity)
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(const.DOMAIN, coordinator.device_identifier)},
-            name=const.DEFAULT_NAME,
-            manufacturer="德普 (Depelec)",
-            model="TD55 Ultra",
-            sw_version="1.1.0",
-        )
+        if coordinator.attach_device_info:
+            self._attr_device_info = DeviceInfo(
+                identifiers={(const.DOMAIN, coordinator.device_identifier)},
+                name=const.DEFAULT_NAME,
+                manufacturer="德普 (Depelec)",
+                model="TD55 Ultra",
+                sw_version=const.INTEGRATION_VERSION,
+            )
 
 
 class DepelecTargetTempNumber(DepelecBaseNumber):
@@ -141,7 +143,7 @@ class DepelecWorkTimeNumber(DepelecBaseNumber):
     _attr_native_unit_of_measurement = UnitOfTime.MINUTES
     _attr_native_step = 1.0
     _attr_native_min_value = 1.0
-    _attr_native_max_value = 180.0
+    _attr_native_max_value = float(const.MAX_WORK_TIME)
     _attr_icon = "mdi:clock-edit-outline"
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
@@ -154,3 +156,27 @@ class DepelecWorkTimeNumber(DepelecBaseNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         self.coordinator.set_target_time(int(value))
+
+
+class DepelecAppointmentTimeNumber(DepelecBaseNumber):
+    """Adjust appointment delay in minutes (0 = start immediately)."""
+
+    _attr_name = "预约延迟时间"
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_native_step = 1.0
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = float(const.MAX_APPOINTMENT_TIME)
+    _attr_icon = "mdi:clock-start"
+
+    def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.device_identifier}_number_appointment_time"
+        )
+
+    @property
+    def native_value(self) -> float:
+        return float(self.coordinator.appointment_time)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.set_appointment_time(int(value))

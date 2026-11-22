@@ -9,7 +9,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature, UnitOfTime
+from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -29,6 +29,10 @@ def _build_entities(coordinator: DepelecOvenCoordinator) -> list[SensorEntity]:
         DepelecTotalTimeSensor(coordinator),
         DepelecWorkStateSensor(coordinator),
         DepelecCurrentModeSensor(coordinator),
+        DepelecAppointmentTimeSensor(coordinator),
+        DepelecAppointmentRemainingTimeSensor(coordinator),
+        DepelecSteamGearSensor(coordinator),
+        DepelecCookingProgressSensor(coordinator),
     ]
 
 
@@ -63,13 +67,14 @@ class DepelecBaseSensor(CoordinatorEntity[DepelecOvenCoordinator], SensorEntity)
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(const.DOMAIN, coordinator.device_identifier)},
-            name=const.DEFAULT_NAME,
-            manufacturer="德普 (Depelec)",
-            model="TD55 Ultra",
-            sw_version="1.1.0",
-        )
+        if coordinator.attach_device_info:
+            self._attr_device_info = DeviceInfo(
+                identifiers={(const.DOMAIN, coordinator.device_identifier)},
+                name=const.DEFAULT_NAME,
+                manufacturer="德普 (Depelec)",
+                model="TD55 Ultra",
+                sw_version=const.INTEGRATION_VERSION,
+            )
 
     @property
     def _data(self) -> dict[str, Any]:
@@ -202,10 +207,12 @@ class DepelecWorkStateSensor(DepelecBaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose active transport (local vs cloud) for diagnostics."""
+        """Expose active transport and raw codes for diagnostics."""
         return {
             "transport": self.coordinator.active_transport,
             "connection_mode": self.coordinator.connection_mode,
+            "work_state_code": self._data.get("WorkState"),
+            "mode_id": self._data.get("Mode"),
         }
 
 
@@ -228,3 +235,87 @@ class DepelecCurrentModeSensor(DepelecBaseSensor):
         return const.ID_TO_MODE_NAME.get(
             mode_id, "无" if mode_id == 0 else f"模式{mode_id}"
         )
+
+
+class DepelecAppointmentTimeSensor(DepelecBaseSensor):
+    """Sensor for configured appointment delay time."""
+
+    _attr_name = "预约设定时间"
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_identifier}_appointment_time"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return configured appointment duration in minutes."""
+        return self._data.get("AppointmentTime")
+
+
+class DepelecAppointmentRemainingTimeSensor(DepelecBaseSensor):
+    """Sensor for remaining appointment countdown time."""
+
+    _attr_name = "预约剩余时间"
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_icon = "mdi:timer-play-outline"
+
+    def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = (
+            f"{coordinator.device_identifier}_appointment_remaining_time"
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        """Return remaining appointment countdown in minutes."""
+        return self._data.get("AppointmentRemainingTime")
+
+
+class DepelecSteamGearSensor(DepelecBaseSensor):
+    """Sensor for active steam / humidity gear reported by the oven."""
+
+    _attr_name = "当前蒸汽/湿度档位"
+    _attr_icon = "mdi:weather-fog"
+
+    def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_identifier}_steam_gear"
+
+    @property
+    def native_value(self) -> str | None:
+        """Return human-readable steam/humidity gear."""
+        gear = self._data.get("SteamGear")
+        if gear is None:
+            return None
+        return const.STEAM_GEAR_LABELS.get(gear, f"{gear}档")
+
+
+class DepelecCookingProgressSensor(DepelecBaseSensor):
+    """Sensor for calculated cooking progress percentage."""
+
+    _attr_name = "烹饪进度"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_icon = "mdi:progress-clock"
+
+    def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_identifier}_cooking_progress"
+
+    @property
+    def native_value(self) -> int:
+        """Return cooking progress from 0 to 100%."""
+        state_code = self._data.get("WorkState", const.WORK_STATE_STANDBY)
+        total = self._data.get("WorkTime") or 0
+        remaining = self._data.get("RemainingWorkTime") or 0
+        if (
+            state_code in (const.WORK_STATE_STANDBY, const.WORK_STATE_APPOINTMENT)
+            or total <= 0
+        ):
+            return 0
+        elapsed = max(0, min(total, total - remaining))
+        return round(elapsed * 100 / total)

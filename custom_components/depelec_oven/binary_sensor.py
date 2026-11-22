@@ -58,13 +58,14 @@ class DepelecBaseBinarySensor(
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(const.DOMAIN, coordinator.device_identifier)},
-            name=const.DEFAULT_NAME,
-            manufacturer="德普 (Depelec)",
-            model="TD55 Ultra",
-            sw_version="1.1.0",
-        )
+        if coordinator.attach_device_info:
+            self._attr_device_info = DeviceInfo(
+                identifiers={(const.DOMAIN, coordinator.device_identifier)},
+                name=const.DEFAULT_NAME,
+                manufacturer="德普 (Depelec)",
+                model="TD55 Ultra",
+                sw_version=const.INTEGRATION_VERSION,
+            )
 
     @property
     def _data(self) -> dict[str, Any]:

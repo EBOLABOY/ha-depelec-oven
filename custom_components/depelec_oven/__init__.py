@@ -8,7 +8,8 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import Event, HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.typing import ConfigType
@@ -72,9 +73,33 @@ CONFIG_SCHEMA = vol.Schema(
     extra=vol.ALLOW_EXTRA,
 )
 
+SERVICE_START_COOKING_SCHEMA = vol.Schema(
+    {
+        vol.Required("mode"): vol.In(list(const.MODES.keys())),
+        vol.Optional("temperature"): vol.All(
+            vol.Coerce(int), vol.Range(min=30, max=230)
+        ),
+        vol.Optional("down_temperature"): vol.All(
+            vol.Coerce(int), vol.Range(min=30, max=230)
+        ),
+        vol.Optional("duration"): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=const.MAX_WORK_TIME)
+        ),
+        vol.Optional("steam_gear"): vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=3)
+        ),
+        vol.Optional("appointment_time"): vol.All(
+            vol.Coerce(int), vol.Range(min=0, max=const.MAX_APPOINTMENT_TIME)
+        ),
+    }
+)
+
 
 def _create_coordinator(
-    hass: HomeAssistant, conf: dict
+    hass: HomeAssistant,
+    conf: dict,
+    *,
+    attach_device_info: bool = False,
 ) -> DepelecOvenCoordinator:
     return DepelecOvenCoordinator(
         hass,
@@ -102,6 +127,40 @@ def _create_coordinator(
         alcs_access_token=conf.get(
             const.CONF_ALCS_ACCESS_TOKEN, const.DEFAULT_ALCS_ACCESS_TOKEN
         ),
+        attach_device_info=attach_device_info,
+    )
+
+
+def _register_services(hass: HomeAssistant) -> None:
+    """Register domain services for automation-friendly one-step cooking control."""
+    if hass.services.has_service(const.DOMAIN, const.SERVICE_START_COOKING):
+        return
+
+    async def _handle_start_cooking(call: ServiceCall) -> None:
+        domain_data: dict = hass.data.get(const.DOMAIN, {})
+        coordinator: DepelecOvenCoordinator | None = domain_data.get("coordinator")
+        if coordinator is None:
+            for item in domain_data.values():
+                if isinstance(item, DepelecOvenCoordinator):
+                    coordinator = item
+                    break
+        if coordinator is None:
+            raise HomeAssistantError("德普蒸烤箱集成尚未就绪，无法下发烹饪指令")
+
+        await coordinator.async_start_cooking(
+            mode_name=call.data["mode"],
+            temperature=call.data.get("temperature"),
+            down_temperature=call.data.get("down_temperature"),
+            duration=call.data.get("duration"),
+            steam_gear=call.data.get("steam_gear"),
+            appointment_time=call.data.get("appointment_time"),
+        )
+
+    hass.services.async_register(
+        const.DOMAIN,
+        const.SERVICE_START_COOKING,
+        _handle_start_cooking,
+        schema=SERVICE_START_COOKING_SCHEMA,
     )
 
 
@@ -113,12 +172,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         return True
 
     conf = config[const.DOMAIN]
-    coordinator = _create_coordinator(hass, conf)
+    coordinator = _create_coordinator(hass, conf, attach_device_info=False)
     await coordinator.async_initialize()
     await coordinator.async_refresh()
 
     hass.data[const.DOMAIN]["coordinator"] = coordinator
     hass.data[const.DOMAIN]["default"] = coordinator
+    _register_services(hass)
 
     async def _async_stop(_event: Event) -> None:
         await coordinator.async_shutdown()
@@ -139,11 +199,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Depelec Oven from a config entry."""
     hass.data.setdefault(const.DOMAIN, {})
 
-    coordinator = _create_coordinator(hass, dict(entry.data))
+    coordinator = _create_coordinator(
+        hass, dict(entry.data), attach_device_info=True
+    )
     await coordinator.async_initialize()
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[const.DOMAIN][entry.entry_id] = coordinator
+    _register_services(hass)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

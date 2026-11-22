@@ -18,6 +18,8 @@ def _build_entities(coordinator: DepelecOvenCoordinator) -> list[SwitchEntity]:
     return [
         DepelecLightSwitch(coordinator),
         DepelecChildLockSwitch(coordinator),
+        DepelecDrainingSwitch(coordinator),
+        DepelecMandatoryPumpingSwitch(coordinator),
     ]
 
 
@@ -52,13 +54,14 @@ class DepelecBaseSwitch(CoordinatorEntity[DepelecOvenCoordinator], SwitchEntity)
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(const.DOMAIN, coordinator.device_identifier)},
-            name=const.DEFAULT_NAME,
-            manufacturer="德普 (Depelec)",
-            model="TD55 Ultra",
-            sw_version="1.1.0",
-        )
+        if coordinator.attach_device_info:
+            self._attr_device_info = DeviceInfo(
+                identifiers={(const.DOMAIN, coordinator.device_identifier)},
+                name=const.DEFAULT_NAME,
+                manufacturer="德普 (Depelec)",
+                model="TD55 Ultra",
+                sw_version=const.INTEGRATION_VERSION,
+            )
 
     @property
     def _data(self) -> dict[str, Any]:
@@ -117,3 +120,57 @@ class DepelecChildLockSwitch(DepelecBaseSwitch):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Release child lock."""
         await self.coordinator.async_set_child_lock(False)
+
+
+class DepelecDrainingSwitch(DepelecBaseSwitch):
+    """Switch reflecting and controlling residual water draining (Draining)."""
+
+    _attr_name = "一键排水"
+    _attr_icon = "mdi:water-minus-outline"
+
+    def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_identifier}_draining"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if draining is active."""
+        val = self._data.get("Draining")
+        if val is None:
+            return None
+        return bool(val == 1)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Trigger water-circuit draining."""
+        await self.coordinator.async_set_draining(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Stop water-circuit draining."""
+        await self.coordinator.async_set_draining(False)
+
+
+class DepelecMandatoryPumpingSwitch(DepelecBaseSwitch):
+    """Switch reflecting and controlling mandatory pumping (MandatoryPumping)."""
+
+    _attr_name = "强制抽水"
+    _attr_icon = "mdi:water-pump"
+
+    def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_identifier}_mandatory_pumping"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if mandatory pumping is active."""
+        val = self._data.get("MandatoryPumping")
+        if val is None:
+            return None
+        return bool(val == 1)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Trigger mandatory water pumping."""
+        await self.coordinator.async_set_mandatory_pumping(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Stop mandatory water pumping."""
+        await self.coordinator.async_set_mandatory_pumping(False)

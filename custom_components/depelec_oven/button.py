@@ -17,6 +17,7 @@ def _build_entities(coordinator: DepelecOvenCoordinator) -> list[ButtonEntity]:
         DepelecStartButton(coordinator),
         DepelecPauseButton(coordinator),
         DepelecStopButton(coordinator),
+        DepelecOpenWaterTankButton(coordinator),
     ]
 
 
@@ -51,17 +52,18 @@ class DepelecBaseButton(CoordinatorEntity[DepelecOvenCoordinator], ButtonEntity)
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(const.DOMAIN, coordinator.device_identifier)},
-            name=const.DEFAULT_NAME,
-            manufacturer="德普 (Depelec)",
-            model="TD55 Ultra",
-            sw_version="1.1.0",
-        )
+        if coordinator.attach_device_info:
+            self._attr_device_info = DeviceInfo(
+                identifiers={(const.DOMAIN, coordinator.device_identifier)},
+                name=const.DEFAULT_NAME,
+                manufacturer="德普 (Depelec)",
+                model="TD55 Ultra",
+                sw_version=const.INTEGRATION_VERSION,
+            )
 
 
 class DepelecStartButton(DepelecBaseButton):
-    """Button to start cooking with current configured mode, temp and duration."""
+    """Button to start cooking with current configured mode, temp, duration & gear."""
 
     _attr_name = "启动烹饪"
     _attr_icon = "mdi:play-circle-outline"
@@ -71,7 +73,7 @@ class DepelecStartButton(DepelecBaseButton):
         self._attr_unique_id = f"{coordinator.device_identifier}_start"
 
     async def async_press(self) -> None:
-        """Trigger start cooking."""
+        """Trigger start cooking (or scheduled start if appointment_time > 0)."""
         await self.coordinator.async_start_cooking()
 
 
@@ -91,7 +93,7 @@ class DepelecPauseButton(DepelecBaseButton):
 
 
 class DepelecStopButton(DepelecBaseButton):
-    """Button to immediately terminate cooking and return to standby."""
+    """Button to immediately terminate cooking or appointment and return to standby."""
 
     _attr_name = "停止烹饪"
     _attr_icon = "mdi:stop-circle-outline"
@@ -103,3 +105,18 @@ class DepelecStopButton(DepelecBaseButton):
     async def async_press(self) -> None:
         """Trigger stop cooking."""
         await self.coordinator.async_stop_cooking()
+
+
+class DepelecOpenWaterTankButton(DepelecBaseButton):
+    """Button to open/eject the motorized water tank via WaterMoto=1."""
+
+    _attr_name = "弹出水箱"
+    _attr_icon = "mdi:water-boiler-auto"
+
+    def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.device_identifier}_open_water_tank"
+
+    async def async_press(self) -> None:
+        """Trigger motorized water tank ejection."""
+        await self.coordinator.async_open_water_tank()

@@ -38,6 +38,7 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         initial_refresh_token: str = const.DEFAULT_INITIAL_REFRESH_TOKEN,
         alcs_access_key: str = const.DEFAULT_ALCS_ACCESS_KEY,
         alcs_access_token: str = const.DEFAULT_ALCS_ACCESS_TOKEN,
+        attach_device_info: bool = False,
     ) -> None:
         """Initialize the oven coordinator."""
         super().__init__(
@@ -49,6 +50,7 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.host = host
         self.port = port
         self.connection_mode = connection_mode
+        self.attach_device_info = attach_device_info
         self.active_transport: str = (
             "local" if connection_mode == const.CONNECTION_MODE_LOCAL else "cloud"
         )
@@ -99,8 +101,10 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.target_temp: int = default_cfg["default_temp"]
         self.down_target_temp: int = default_cfg["default_temp"]
         self.target_time: int = default_cfg["default_time"]
+        self.steam_gear: int = self._default_gear_for_mode(default_cfg)
+        self.appointment_time: int = 0
 
-        # Shadow state using exact Alink thing-model keys
+        # Shadow state using exact Alink thing-model keys (all 18 TD55 Ultra properties)
         self._state_data: dict[str, Any] = {
             "CurrentTemperature": 0,
             "DownCurrentTemperature": 0,
@@ -112,12 +116,28 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "AppointmentRemainingTime": 0,
             "WorkState": const.WORK_STATE_STANDBY,
             "Mode": 0,
+            "SteamGear": 0,
             "LightSwitch": 0,
             "ChildLockSwitch": 0,
             "Door": 0,
             "Cistern": 0,
             "WaterShortage": 0,
+            "Draining": 0,
+            "MandatoryPumping": 0,
         }
+
+    @staticmethod
+    def _default_gear_for_mode(cfg: dict[str, Any]) -> int:
+        if cfg.get("is_humidity_gear") == 1:
+            return int(cfg.get("humidity_gear_default", 3))
+        return int(cfg.get("steam_gear_default", 1))
+
+    @staticmethod
+    def mode_supports_gear(cfg: dict[str, Any] | None) -> bool:
+        """Return True if the mode supports 3-level steam or humidity gear."""
+        if not cfg:
+            return False
+        return cfg.get("is_steam_gear") == 1 or cfg.get("is_humidity_gear") == 1
 
     @property
     def device_identifier(self) -> str:
@@ -297,8 +317,29 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._state_data["ChildLockSwitch"] = val
         self.async_set_updated_data(dict(self._state_data))
 
+    async def async_set_draining(self, state: bool) -> None:
+        """Start or stop water-circuit draining (Draining)."""
+        val = 1 if state else 0
+        if not await self._async_send_property("Draining", val):
+            raise HomeAssistantError("下发一键排水指令失败，请检查网络连接或设备状态")
+        self._state_data["Draining"] = val
+        self.async_set_updated_data(dict(self._state_data))
+
+    async def async_set_mandatory_pumping(self, state: bool) -> None:
+        """Start or stop mandatory water pumping (MandatoryPumping)."""
+        val = 1 if state else 0
+        if not await self._async_send_property("MandatoryPumping", val):
+            raise HomeAssistantError("下发强制抽水指令失败，请检查网络连接或设备状态")
+        self._state_data["MandatoryPumping"] = val
+        self.async_set_updated_data(dict(self._state_data))
+
+    async def async_open_water_tank(self) -> None:
+        """Eject/open the motorized water tank via WaterMoto=1."""
+        if not await self._async_send_property("WaterMoto", 1):
+            raise HomeAssistantError("下发弹出水箱指令失败，请检查网络连接或设备状态")
+
     def set_selected_mode(self, mode_name: str) -> None:
-        """Update selected cooking mode in UI and load recommended temp/time."""
+        """Update selected cooking mode in UI and load recommended temp/time/gear."""
         if mode_name not in const.MODES:
             return
         cfg = const.MODES[mode_name]
@@ -306,14 +347,18 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.target_temp = cfg["default_temp"]
         self.down_target_temp = cfg["default_temp"]
         self.target_time = cfg["default_time"]
+        self.steam_gear = self._default_gear_for_mode(cfg)
         self.async_set_updated_data(dict(self._state_data))
 
     def set_target_temp(self, temp: int) -> None:
-        """Update UI target temperature, clamped to the active mode range."""
+        """Update UI target temperature, keeping lower temp synced unless explicitly split."""
         cfg = const.MODES.get(self.selected_mode)
         if cfg:
             temp = max(cfg["min_temp"], min(cfg["max_temp"], int(temp)))
-        self.target_temp = int(temp)
+        new_temp = int(temp)
+        if self.down_target_temp == self.target_temp:
+            self.down_target_temp = new_temp
+        self.target_temp = new_temp
         self.async_set_updated_data(dict(self._state_data))
 
     def set_down_target_temp(self, temp: int) -> None:
@@ -326,49 +371,130 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def set_target_time(self, mins: int) -> None:
         """Update UI target cooking duration."""
-        self.target_time = max(1, min(180, int(mins)))
+        self.target_time = max(1, min(const.MAX_WORK_TIME, int(mins)))
         self.async_set_updated_data(dict(self._state_data))
 
-    async def async_start_cooking(self) -> None:
-        """Start cooking using current selected mode, temp and duration."""
-        cfg = const.MODES.get(self.selected_mode)
+    def set_steam_gear(self, gear: int) -> None:
+        """Update UI steam/humidity gear (1=低, 2=中, 3=高)."""
+        self.steam_gear = max(1, min(3, int(gear)))
+        self.async_set_updated_data(dict(self._state_data))
+
+    def set_appointment_time(self, mins: int) -> None:
+        """Update UI appointment delay in minutes (0 = start immediately)."""
+        self.appointment_time = max(0, min(const.MAX_APPOINTMENT_TIME, int(mins)))
+        self.async_set_updated_data(dict(self._state_data))
+
+    async def async_start_cooking(
+        self,
+        *,
+        mode_name: str | None = None,
+        temperature: int | None = None,
+        down_temperature: int | None = None,
+        duration: int | None = None,
+        steam_gear: int | None = None,
+        appointment_time: int | None = None,
+    ) -> None:
+        """Start cooking (or schedule via appointment_time > 0)."""
+        active_mode = mode_name if mode_name is not None else self.selected_mode
+        cfg = const.MODES.get(active_mode)
         if not cfg:
-            raise HomeAssistantError(f"未知的烹饪模式: {self.selected_mode}")
+            raise HomeAssistantError(f"未知的烹饪模式: {active_mode}")
+
+        raw_temp = (
+            temperature
+            if temperature is not None
+            else (cfg["default_temp"] if mode_name is not None else self.target_temp)
+        )
+        eff_temp = max(cfg["min_temp"], min(cfg["max_temp"], int(raw_temp)))
+
+        raw_down = (
+            down_temperature
+            if down_temperature is not None
+            else (
+                eff_temp
+                if mode_name is not None or temperature is not None
+                else self.down_target_temp
+            )
+        )
+        eff_down = max(cfg["min_temp"], min(cfg["max_temp"], int(raw_down)))
+
+        raw_time = (
+            duration
+            if duration is not None
+            else (cfg["default_time"] if mode_name is not None else self.target_time)
+        )
+        eff_time = max(1, min(const.MAX_WORK_TIME, int(raw_time)))
+
+        raw_appt = (
+            appointment_time
+            if appointment_time is not None
+            else (0 if mode_name is not None else self.appointment_time)
+        )
+        eff_appt = max(0, min(const.MAX_APPOINTMENT_TIME, int(raw_appt)))
 
         identifier = cfg["service"]
         args: dict[str, Any] = {
-            "ToastTemperature": int(self.target_temp),
-            "WorkTime": int(self.target_time),
+            "ToastTemperature": eff_temp,
+            "WorkTime": eff_time,
             "WorkSwitch": 1,
-            "AppointmentTime": 0,
+            "AppointmentTime": eff_appt,
         }
         if cfg["temp_control"] == 1:
-            args["DownToastTemperature"] = int(self.down_target_temp)
+            args["DownToastTemperature"] = eff_down
+
+        eff_gear = 0
+        if self.mode_supports_gear(cfg):
+            raw_gear = (
+                steam_gear
+                if steam_gear is not None
+                else (
+                    self._default_gear_for_mode(cfg)
+                    if mode_name is not None
+                    else self.steam_gear
+                )
+            )
+            eff_gear = max(1, min(3, int(raw_gear)))
+            args["SteamGear"] = eff_gear
 
         _LOGGER.info(
-            "Starting oven mode: %s (%s) with %s", self.selected_mode, identifier, args
+            "Starting oven mode: %s (%s) with %s", active_mode, identifier, args
         )
         if not await self._async_send_service(identifier, args):
-            raise HomeAssistantError(f"启动烹饪模式 [{self.selected_mode}] 失败")
+            raise HomeAssistantError(f"启动烹饪模式 [{active_mode}] 失败")
 
-        self._state_data["WorkState"] = const.WORK_STATE_HEATING
+        # Sync UI selection state with dispatched command
+        self.selected_mode = active_mode
+        self.target_temp = eff_temp
+        self.down_target_temp = eff_down if cfg["temp_control"] == 1 else eff_temp
+        self.target_time = eff_time
+        self.appointment_time = eff_appt
+        if eff_gear:
+            self.steam_gear = eff_gear
+
+        self._state_data["WorkState"] = (
+            const.WORK_STATE_APPOINTMENT if eff_appt > 0 else const.WORK_STATE_HEATING
+        )
         self._state_data["Mode"] = cfg["id"]
-        self._state_data["ToastTemperature"] = self.target_temp
-        if cfg["temp_control"] == 1:
-            self._state_data["DownToastTemperature"] = self.down_target_temp
-        self._state_data["WorkTime"] = self.target_time
-        self._state_data["RemainingWorkTime"] = self.target_time
+        self._state_data["ToastTemperature"] = eff_temp
+        self._state_data["DownToastTemperature"] = (
+            eff_down if cfg["temp_control"] == 1 else 0
+        )
+        self._state_data["WorkTime"] = eff_time
+        self._state_data["RemainingWorkTime"] = eff_time
+        self._state_data["AppointmentTime"] = eff_appt
+        self._state_data["AppointmentRemainingTime"] = eff_appt
+        self._state_data["SteamGear"] = eff_gear
         self.async_set_updated_data(dict(self._state_data))
 
     async def async_pause_cooking(self) -> None:
-        """Toggle pause / resume cooking (only valid while heating or paused)."""
+        """Toggle pause / resume cooking (valid while active or paused)."""
         current_state = self._state_data.get("WorkState", const.WORK_STATE_STANDBY)
         if current_state == const.WORK_STATE_PAUSED:
             if not await self._async_send_property("PauseSwitch", 0):
                 raise HomeAssistantError("恢复烹饪指令下发失败")
             self._state_data["WorkState"] = const.WORK_STATE_HEATING
             self.async_set_updated_data(dict(self._state_data))
-        elif current_state == const.WORK_STATE_HEATING:
+        elif current_state in const.ACTIVE_COOKING_STATES:
             if not await self._async_send_property("PauseSwitch", 1):
                 raise HomeAssistantError("暂停烹饪指令下发失败")
             self._state_data["WorkState"] = const.WORK_STATE_PAUSED
@@ -377,7 +503,7 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise HomeAssistantError("当前蒸烤箱未在运行中，无法执行暂停或继续操作")
 
     async def async_stop_cooking(self) -> None:
-        """Stop cooking operation immediately via StopWork=1."""
+        """Stop cooking or cancel appointment immediately via StopWork=1."""
         if not await self._async_send_property("StopWork", 1):
             raise HomeAssistantError("停止烹饪指令下发失败")
         self._state_data["WorkState"] = const.WORK_STATE_STANDBY
@@ -386,4 +512,7 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._state_data["RemainingWorkTime"] = 0
         self._state_data["ToastTemperature"] = 0
         self._state_data["DownToastTemperature"] = 0
+        self._state_data["AppointmentTime"] = 0
+        self._state_data["AppointmentRemainingTime"] = 0
+        self._state_data["SteamGear"] = 0
         self.async_set_updated_data(dict(self._state_data))
