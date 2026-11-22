@@ -61,6 +61,7 @@ class DepelecCloudClient:
             initial_iot_token, initial_refresh_token
         )
         self._token_issued_at = 0  # Unknown age until refreshed or loaded from store
+        self._last_refresh_fail_at = 0
         self._alcs_access_key = ""
         self._alcs_access_token = ""
         self._lock = asyncio.Lock()
@@ -224,6 +225,11 @@ class DepelecCloudClient:
                 return True
 
             now = int(time.time())
+            if self._last_refresh_fail_at > 0:
+                cooldown = 60 if force else 600
+                if now - self._last_refresh_fail_at < cooldown:
+                    return False
+
             if (
                 not force
                 and self._iot_token
@@ -267,6 +273,7 @@ class DepelecCloudClient:
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
                     if resp.status != 200:
+                        self._last_refresh_fail_at = int(time.time())
                         text = await resp.text()
                         _LOGGER.error(
                             "Token refresh HTTP %s: %s", resp.status, text[:200]
@@ -286,15 +293,25 @@ class DepelecCloudClient:
                         if new_refresh:
                             self._refresh_token = new_refresh
                         self._token_issued_at = int(time.time())
+                        self._last_refresh_fail_at = 0
                         await self.async_save_storage()
                         _LOGGER.info(
                             "Successfully refreshed Aliyun IoT tokens (valid for next 20h)"
                         )
                         return True
 
-                    _LOGGER.error("Failed to refresh token: %s", resp_json)
+                    self._last_refresh_fail_at = int(time.time())
+                    self._token_issued_at = 0
+                    if isinstance(resp_json, dict) and resp_json.get("code") == 2401:
+                        _LOGGER.warning(
+                            "Depelec oven refreshToken is invalid/expired. Please re-authenticate: %s",
+                            resp_json.get("localizedMsg") or resp_json.get("message"),
+                        )
+                    else:
+                        _LOGGER.error("Failed to refresh token: %s", resp_json)
                     return False
             except Exception as err:
+                self._last_refresh_fail_at = int(time.time())
                 _LOGGER.error("Exception during token refresh: %s", err)
                 return False
 
@@ -309,7 +326,9 @@ class DepelecCloudClient:
         if not self.has_credentials:
             return None
 
-        await self.async_check_or_refresh_token()
+        ok = await self.async_check_or_refresh_token()
+        if not ok and self._last_refresh_fail_at > 0:
+            return None
         used_token = self._iot_token
 
         body = {
