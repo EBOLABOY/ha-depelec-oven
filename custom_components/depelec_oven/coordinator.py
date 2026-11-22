@@ -377,9 +377,13 @@ class DepelecOvenCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise HomeAssistantError("当前蒸烤箱未在运行中，无法执行暂停或继续操作")
 
     async def async_stop_cooking(self) -> None:
-        """Stop cooking operation immediately."""
-        if not await self._async_send_property("WorkSwitch", 0):
+        """Stop cooking operation immediately via StopWork=1."""
+        if not await self._async_send_property("StopWork", 1):
             raise HomeAssistantError("停止烹饪指令下发失败")
         self._state_data["WorkState"] = const.WORK_STATE_STANDBY
+        self._state_data["Mode"] = 0
+        self._state_data["WorkTime"] = 0
         self._state_data["RemainingWorkTime"] = 0
+        self._state_data["ToastTemperature"] = 0
+        self._state_data["DownToastTemperature"] = 0
         self.async_set_updated_data(dict(self._state_data))

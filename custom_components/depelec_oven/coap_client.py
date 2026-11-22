@@ -381,6 +381,7 @@ class DepelecCoapClient:
         mid: int,
         token: bytes,
         timeout: float = 3.0,
+        accept_empty_ack: bool = False,
     ) -> dict[str, Any] | None:
         """Send a CoAP packet over the persistent UDP socket and await its response."""
         protocol = await self._ensure_transport()
@@ -395,14 +396,37 @@ class DepelecCoapClient:
 
         protocol.transport.sendto(pkt, (self.host, self.port))
         deadline = time.monotonic() + timeout
+        got_empty_ack = False
 
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                if got_empty_ack and accept_empty_ack:
+                    return {
+                        "type": COAP_TYPE_ACK,
+                        "code": COAP_CODE_EMPTY,
+                        "msg_id": mid,
+                        "token": token,
+                        "options": [],
+                        "session_id": None,
+                        "payload": b"",
+                        "ack_only": True,
+                    }
                 return None
             try:
                 raw, _addr = await asyncio.wait_for(protocol.queue.get(), timeout=remaining)
             except asyncio.TimeoutError:
+                if got_empty_ack and accept_empty_ack:
+                    return {
+                        "type": COAP_TYPE_ACK,
+                        "code": COAP_CODE_EMPTY,
+                        "msg_id": mid,
+                        "token": token,
+                        "options": [],
+                        "session_id": None,
+                        "payload": b"",
+                        "ack_only": True,
+                    }
                 return None
 
             try:
@@ -414,8 +438,12 @@ class DepelecCoapClient:
             if parsed["token"] != token and parsed["msg_id"] != mid:
                 continue
 
-            # Empty ACK means the device will send a separate response packet
+            # Empty ACK means the device received the CON packet; wait briefly for any
+            # separate response (e.g., 4.01 Unauthorized or JSON reply)
             if parsed["code"] == COAP_CODE_EMPTY:
+                got_empty_ack = True
+                if accept_empty_ack:
+                    deadline = min(deadline, time.monotonic() + 0.8)
                 continue
 
             # Acknowledge separate CON responses from the device
@@ -617,6 +645,7 @@ class DepelecCoapClient:
         path: str,
         payload_dict: dict[str, Any],
         timeout: float = 3.0,
+        accept_empty_ack: bool = False,
     ) -> dict[str, Any] | None:
         """Send an encrypted ALCS CoAP request and return decrypted JSON response."""
         async with self._lock:
@@ -641,7 +670,13 @@ class DepelecCoapClient:
                     content_format=CONTENT_FORMAT_APP_OCTET_STREAM,
                     session_id=self._session_id,
                 )
-                resp = await self._send_and_recv(pkt, mid, token, timeout=timeout)
+                resp = await self._send_and_recv(
+                    pkt,
+                    mid,
+                    token,
+                    timeout=timeout,
+                    accept_empty_ack=accept_empty_ack,
+                )
                 if resp is None:
                     return None
 
@@ -650,6 +685,9 @@ class DepelecCoapClient:
                     self._session_id = None
                     self._session_key = None
                     continue
+
+                if resp.get("ack_only"):
+                    return {"code": 200, "ack_only": True}
 
                 if not resp["payload"]:
                     return None
@@ -735,5 +773,9 @@ class DepelecCoapClient:
             "params": args,
         }
         path = f"/sys/{self.product_key}/{self.device_name}/thing/service/{identifier}"
-        resp = await self._async_secure_request(path, req_payload)
+        # LinkKit ALCS service handlers acknowledge receipt via Empty ACK and execute
+        # asynchronously on the MCU without sending a separate CoAP JSON reply.
+        resp = await self._async_secure_request(
+            path, req_payload, accept_empty_ack=True
+        )
         return resp is not None and resp.get("code") == 200
