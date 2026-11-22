@@ -4,12 +4,20 @@ from __future__ import annotations
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import const
 from .coordinator import DepelecOvenCoordinator
+
+
+def _build_entities(coordinator: DepelecOvenCoordinator) -> list[ButtonEntity]:
+    return [
+        DepelecStartButton(coordinator),
+        DepelecPauseButton(coordinator),
+        DepelecStopButton(coordinator),
+    ]
 
 
 async def async_setup_platform(
@@ -19,13 +27,11 @@ async def async_setup_platform(
     discovery_info: dict | None = None,
 ) -> None:
     """Set up button entities for Depelec Oven from YAML."""
-    coordinator: DepelecOvenCoordinator = hass.data[const.DOMAIN].get("coordinator")
+    coordinator: DepelecOvenCoordinator | None = hass.data[const.DOMAIN].get(
+        "coordinator"
+    )
     if coordinator:
-        async_add_entities([
-            DepelecStartButton(coordinator),
-            DepelecPauseButton(coordinator),
-            DepelecStopButton(coordinator),
-        ])
+        async_add_entities(_build_entities(coordinator))
 
 
 async def async_setup_entry(
@@ -35,11 +41,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up button entities for Depelec Oven."""
     coordinator: DepelecOvenCoordinator = hass.data[const.DOMAIN][entry.entry_id]
-    async_add_entities([
-        DepelecStartButton(coordinator),
-        DepelecPauseButton(coordinator),
-        DepelecStopButton(coordinator),
-    ])
+    async_add_entities(_build_entities(coordinator))
 
 
 class DepelecBaseButton(CoordinatorEntity[DepelecOvenCoordinator], ButtonEntity):
@@ -50,24 +52,23 @@ class DepelecBaseButton(CoordinatorEntity[DepelecOvenCoordinator], ButtonEntity)
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_device_info = DeviceInfo(
-            identifiers={(const.DOMAIN, coordinator.client.device_name)},
+            identifiers={(const.DOMAIN, coordinator.device_identifier)},
             name=const.DEFAULT_NAME,
             manufacturer="德普 (Depelec)",
             model="TD55 Ultra",
-            sw_version="1.0.0",
+            sw_version="1.1.0",
         )
 
 
 class DepelecStartButton(DepelecBaseButton):
     """Button to start cooking with current configured mode, temp and duration."""
 
-    _attr_translation_key = "start_cooking"
     _attr_name = "启动烹饪"
     _attr_icon = "mdi:play-circle-outline"
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.client.device_name}_start"
+        self._attr_unique_id = f"{coordinator.device_identifier}_start"
 
     async def async_press(self) -> None:
         """Trigger start cooking."""
@@ -77,13 +78,12 @@ class DepelecStartButton(DepelecBaseButton):
 class DepelecPauseButton(DepelecBaseButton):
     """Button to pause or resume current cooking program."""
 
-    _attr_translation_key = "pause_cooking"
     _attr_name = "暂停/继续"
     _attr_icon = "mdi:pause-circle-outline"
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.client.device_name}_pause"
+        self._attr_unique_id = f"{coordinator.device_identifier}_pause"
 
     async def async_press(self) -> None:
         """Toggle pause state."""
@@ -93,13 +93,12 @@ class DepelecPauseButton(DepelecBaseButton):
 class DepelecStopButton(DepelecBaseButton):
     """Button to immediately terminate cooking and return to standby."""
 
-    _attr_translation_key = "stop_cooking"
     _attr_name = "停止烹饪"
     _attr_icon = "mdi:stop-circle-outline"
 
     def __init__(self, coordinator: DepelecOvenCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.client.device_name}_stop"
+        self._attr_unique_id = f"{coordinator.device_identifier}_stop"
 
     async def async_press(self) -> None:
         """Trigger stop cooking."""

@@ -8,18 +8,33 @@ DEFAULT_NAME = "德普 TD55 Ultra 蒸烤箱"
 DEFAULT_HOST = "192.168.1.100"
 DEFAULT_PORT = 5683
 DEFAULT_PRODUCT_KEY = "a1Bq3pNE7Er"
-DEFAULT_DEVICE_NAME = "your_device_name"
-DEFAULT_IOT_ID = "your_iot_id"
+DEFAULT_DEVICE_NAME = ""
+DEFAULT_IOT_ID = ""
+# Public mobile app credentials extracted from the official Depelec app
 DEFAULT_APP_KEY = "28770785"
 DEFAULT_APP_SECRET = "41fd4a1eb18fa7ace5e2abbbe3867f93"
-DEFAULT_INITIAL_IOT_TOKEN = "your_initial_iot_token"
-DEFAULT_INITIAL_REFRESH_TOKEN = "your_initial_refresh_token"
-DEFAULT_IDENTITY_ID = "your_identity_id"
+DEFAULT_INITIAL_IOT_TOKEN = ""
+DEFAULT_INITIAL_REFRESH_TOKEN = ""
+DEFAULT_IDENTITY_ID = ""
+DEFAULT_ALCS_ACCESS_KEY = ""
+DEFAULT_ALCS_ACCESS_TOKEN = ""
 
 CONF_HOST = "host"
 CONF_PORT = "port"
 CONF_SCAN_INTERVAL = "scan_interval"
-DEFAULT_SCAN_INTERVAL = 5
+DEFAULT_SCAN_INTERVAL = 15
+
+# Connection modes
+CONF_CONNECTION_MODE = "connection_mode"
+CONNECTION_MODE_AUTO = "auto"
+CONNECTION_MODE_LOCAL = "local"
+CONNECTION_MODE_CLOUD = "cloud"
+CONNECTION_MODES = (
+    CONNECTION_MODE_AUTO,
+    CONNECTION_MODE_LOCAL,
+    CONNECTION_MODE_CLOUD,
+)
+DEFAULT_CONNECTION_MODE = CONNECTION_MODE_AUTO
 
 # Configuration keys
 CONF_PRODUCT_KEY = "product_key"
@@ -30,6 +45,27 @@ CONF_APP_SECRET = "app_secret"
 CONF_INITIAL_IOT_TOKEN = "initial_iot_token"
 CONF_INITIAL_REFRESH_TOKEN = "initial_refresh_token"
 CONF_IDENTITY_ID = "identity_id"
+CONF_ALCS_ACCESS_KEY = "alcs_access_key"
+CONF_ALCS_ACCESS_TOKEN = "alcs_access_token"
+
+# Known Alink Thing-Model properties queried over local ALCS CoAP
+OVEN_PROPERTIES: list[str] = [
+    "CurrentTemperature",
+    "DownCurrentTemperature",
+    "ToastTemperature",
+    "DownToastTemperature",
+    "WorkTime",
+    "RemainingWorkTime",
+    "AppointmentTime",
+    "AppointmentRemainingTime",
+    "WorkState",
+    "Mode",
+    "LightSwitch",
+    "ChildLockSwitch",
+    "Door",
+    "Cistern",
+    "WaterShortage",
+]
 
 # Status mappings
 WORK_STATE_STANDBY = 1

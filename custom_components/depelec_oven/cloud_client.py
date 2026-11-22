@@ -7,18 +7,26 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import time
 from typing import Any
 import uuid
 
 import aiohttp
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 
 from . import const
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_PATH = "/config/.storage/depelec_oven_auth.json"
+STORAGE_VERSION = 1
+STORAGE_KEY = f"{const.DOMAIN}_auth"
+
+
+def _token_fingerprint(iot_token: str, refresh_token: str) -> str:
+    """Compute a short hash of configured initial tokens to detect YAML updates."""
+    raw = f"{iot_token}|{refresh_token}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
 
 
 class DepelecCloudClient:
@@ -26,6 +34,7 @@ class DepelecCloudClient:
 
     def __init__(
         self,
+        hass: HomeAssistant | None = None,
         session: aiohttp.ClientSession | None = None,
         iot_id: str = const.DEFAULT_IOT_ID,
         app_key: str = const.DEFAULT_APP_KEY,
@@ -35,8 +44,8 @@ class DepelecCloudClient:
         identity_id: str = const.DEFAULT_IDENTITY_ID,
         product_key: str = const.DEFAULT_PRODUCT_KEY,
         device_name: str = const.DEFAULT_DEVICE_NAME,
-        storage_path: str = STORAGE_PATH,
     ) -> None:
+        self._hass = hass
         self._session = session
         self._own_session = False
         self.iot_id = iot_id
@@ -45,50 +54,107 @@ class DepelecCloudClient:
         self.identity_id = identity_id
         self.product_key = product_key
         self.device_name = device_name
-        self.storage_path = storage_path
 
         self._iot_token = initial_iot_token
         self._refresh_token = initial_refresh_token
-        self._token_issued_at = int(time.time())
+        self._initial_fingerprint = _token_fingerprint(
+            initial_iot_token, initial_refresh_token
+        )
+        self._token_issued_at = 0  # Unknown age until refreshed or loaded from store
+        self._alcs_access_key = ""
+        self._alcs_access_token = ""
         self._lock = asyncio.Lock()
 
-        # Load persisted token if available
-        self._load_storage()
+        self._store: Store[dict[str, Any]] | None = (
+            Store(hass, STORAGE_VERSION, STORAGE_KEY) if hass is not None else None
+        )
 
-    def _load_storage(self) -> None:
-        """Load cached tokens from storage file if present."""
-        try:
-            if os.path.exists(self.storage_path):
-                with open(self.storage_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data.get("iotToken"):
-                        self._iot_token = data["iotToken"]
-                    if data.get("refreshToken"):
-                        self._refresh_token = data["refreshToken"]
-                    if data.get("token_issued_at"):
-                        self._token_issued_at = data["token_issued_at"]
-                    _LOGGER.info("Loaded persisted Aliyun tokens from %s", self.storage_path)
-        except Exception as err:
-            _LOGGER.warning("Could not read auth storage %s: %s", self.storage_path, err)
+    @property
+    def has_credentials(self) -> bool:
+        """Return True if cloud credentials are configured."""
+        return bool(
+            self.iot_id
+            and self.identity_id
+            and (self._iot_token or self._refresh_token)
+        )
 
-    def _save_storage(self) -> None:
-        """Save tokens to storage file."""
+    @property
+    def cached_alcs_credentials(self) -> tuple[str, str]:
+        """Return persisted ALCS (accessKey, accessToken) if available."""
+        return self._alcs_access_key, self._alcs_access_token
+
+    async def async_load_storage(self) -> None:
+        """Load cached tokens and ALCS credentials asynchronously via HA Store."""
+        if self._store is None:
+            return
         try:
-            os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
-            with open(self.storage_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "iotToken": self._iot_token,
-                        "refreshToken": self._refresh_token,
-                        "identityId": self.identity_id,
-                        "token_issued_at": self._token_issued_at,
-                    },
-                    f,
-                    indent=2,
+            all_data = await self._store.async_load()
+            if not isinstance(all_data, dict):
+                return
+
+            # Support both per-iot_id keyed format and legacy single-entry format
+            key = self.iot_id or "default"
+            entry = all_data.get(key)
+            if not isinstance(entry, dict) and "iotToken" in all_data:
+                entry = all_data
+
+            if not isinstance(entry, dict):
+                return
+
+            # Always restore cached local ALCS credentials if present
+            if entry.get("alcsAccessKey") and entry.get("alcsAccessToken"):
+                self._alcs_access_key = entry["alcsAccessKey"]
+                self._alcs_access_token = entry["alcsAccessToken"]
+            if not self.product_key and entry.get("productKey"):
+                self.product_key = entry["productKey"]
+            if not self.device_name and entry.get("deviceName"):
+                self.device_name = entry["deviceName"]
+
+            # Only use cached cloud tokens if the user hasn't updated initial tokens in YAML
+            saved_fp = entry.get("initial_fingerprint")
+            if saved_fp and saved_fp != self._initial_fingerprint and (
+                self._iot_token or self._refresh_token
+            ):
+                _LOGGER.info(
+                    "Detected updated initial cloud tokens in configuration; ignoring stale cached cloud tokens"
                 )
-            _LOGGER.debug("Saved refreshed Aliyun tokens to %s", self.storage_path)
+                return
+
+            if entry.get("iotToken"):
+                self._iot_token = entry["iotToken"]
+            if entry.get("refreshToken"):
+                self._refresh_token = entry["refreshToken"]
+            if isinstance(entry.get("token_issued_at"), (int, float)):
+                self._token_issued_at = int(entry["token_issued_at"])
+            _LOGGER.info("Loaded persisted Aliyun credentials from HA storage")
         except Exception as err:
-            _LOGGER.warning("Could not write auth storage %s: %s", self.storage_path, err)
+            _LOGGER.warning("Could not read auth storage: %s", err)
+
+    async def async_save_storage(self) -> None:
+        """Persist refreshed tokens and ALCS credentials atomically via HA Store."""
+        if self._store is None:
+            return
+        try:
+            all_data = await self._store.async_load()
+            if not isinstance(all_data, dict) or "iotToken" in all_data:
+                all_data = {}
+
+            key = self.iot_id or "default"
+            all_data[key] = {
+                "iotToken": self._iot_token,
+                "refreshToken": self._refresh_token,
+                "identityId": self.identity_id,
+                "token_issued_at": self._token_issued_at,
+                "initial_fingerprint": self._initial_fingerprint,
+                "alcsAccessKey": self._alcs_access_key,
+                "alcsAccessToken": self._alcs_access_token,
+                "productKey": self.product_key,
+                "deviceName": self.device_name,
+            }
+            await self._store.async_save(all_data)
+            _LOGGER.debug("Saved refreshed Aliyun credentials to HA storage")
+        except Exception as err:
+            _LOGGER.warning("Could not write auth storage: %s", err)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -121,10 +187,14 @@ class DepelecCloudClient:
             + f"\n{path}"
         )
         signature = base64.b64encode(
-            hmac.new(self.app_secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha1).digest()
+            hmac.new(
+                self.app_secret.encode("utf-8"),
+                canonical.encode("utf-8"),
+                hashlib.sha1,
+            ).digest()
         ).decode("utf-8")
 
-        headers = {
+        return {
             "Content-Type": "application/octet-stream",
             "Accept": "application/json; charset=utf-8",
             "Content-MD5": c_md5,
@@ -138,14 +208,33 @@ class DepelecCloudClient:
             "X-Ca-Signature-Method": "HmacSHA1",
             "X-Ca-Signature": signature,
         }
-        return headers
 
-    async def async_check_or_refresh_token(self, force: bool = False) -> bool:
-        """Check if iotToken is near expiry (20 hours total, refresh after 18h) and refresh it."""
+    async def async_check_or_refresh_token(
+        self,
+        force: bool = False,
+        failed_token: str | None = None,
+    ) -> bool:
+        """Check if iotToken is near expiry (refresh after 18h) and refresh it."""
+        if not self._refresh_token:
+            return bool(self._iot_token)
+
         async with self._lock:
-            # Refresh if older than 18 hours or forced
+            # If another concurrent coroutine already refreshed past failed_token, reuse it
+            if failed_token and self._iot_token and self._iot_token != failed_token:
+                return True
+
             now = int(time.time())
-            if not force and (now - self._token_issued_at < 18 * 3600):
+            if (
+                not force
+                and self._iot_token
+                and self._token_issued_at > 0
+                and (now - self._token_issued_at < 18 * 3600)
+            ):
+                return True
+
+            # On first boot with a fresh YAML iotToken and no stored timestamp yet, try it first
+            if not force and self._iot_token and self._token_issued_at == 0:
+                self._token_issued_at = now
                 return True
 
             _LOGGER.info("Refreshing Aliyun IoT token via /account/checkOrRefreshSession...")
@@ -171,26 +260,57 @@ class DepelecCloudClient:
 
             session = await self._get_session()
             try:
-                async with session.post(url, data=body_bytes, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    resp_json = await resp.json(content_type=None)
-                    if resp_json.get("code") == 200 and "data" in resp_json:
-                        data = resp_json["data"]
-                        self._iot_token = data.get("iotToken", self._iot_token)
-                        self._refresh_token = data.get("refreshToken", self._refresh_token)
-                        self._token_issued_at = int(time.time())
-                        self._save_storage()
-                        _LOGGER.info("Successfully refreshed Aliyun IoT tokens (valid for next 20h)")
-                        return True
-                    else:
-                        _LOGGER.error("Failed to refresh token: %s", resp_json)
+                async with session.post(
+                    url,
+                    data=body_bytes,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        _LOGGER.error(
+                            "Token refresh HTTP %s: %s", resp.status, text[:200]
+                        )
                         return False
+                    resp_json = await resp.json(content_type=None)
+                    data = resp_json.get("data") if isinstance(resp_json, dict) else None
+                    if (
+                        isinstance(resp_json, dict)
+                        and resp_json.get("code") == 200
+                        and isinstance(data, dict)
+                    ):
+                        new_iot = data.get("iotToken")
+                        new_refresh = data.get("refreshToken")
+                        if new_iot:
+                            self._iot_token = new_iot
+                        if new_refresh:
+                            self._refresh_token = new_refresh
+                        self._token_issued_at = int(time.time())
+                        await self.async_save_storage()
+                        _LOGGER.info(
+                            "Successfully refreshed Aliyun IoT tokens (valid for next 20h)"
+                        )
+                        return True
+
+                    _LOGGER.error("Failed to refresh token: %s", resp_json)
+                    return False
             except Exception as err:
                 _LOGGER.error("Exception during token refresh: %s", err)
                 return False
 
-    async def _async_request(self, path: str, api_ver: str, params: dict[str, Any], retry_on_auth_fail: bool = True) -> dict[str, Any] | None:
-        """Execute a signed request to Aliyun IoT Gateway with auto-refresh on 401/460."""
+    async def _async_request(
+        self,
+        path: str,
+        api_ver: str,
+        params: dict[str, Any],
+        retry_on_auth_fail: bool = True,
+    ) -> dict[str, Any] | None:
+        """Execute a signed request to Aliyun IoT Gateway with auto-refresh on auth error."""
+        if not self.has_credentials:
+            return None
+
         await self.async_check_or_refresh_token()
+        used_token = self._iot_token
 
         body = {
             "id": str(uuid.uuid4()).upper(),
@@ -199,11 +319,11 @@ class DepelecCloudClient:
                 "language": "zh-CN",
                 "appKey": self.app_key,
                 "apiVer": api_ver,
-                "iotToken": self._iot_token,
+                "iotToken": used_token,
             },
             "params": {
                 **params,
-                "iotToken": self._iot_token,
+                "iotToken": used_token,
             },
         }
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
@@ -212,21 +332,87 @@ class DepelecCloudClient:
 
         session = await self._get_session()
         try:
-            async with session.post(url, data=body_bytes, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                resp_json = await resp.json(content_type=None)
-                code = resp_json.get("code")
+            async with session.post(
+                url,
+                data=body_bytes,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    _LOGGER.error(
+                        "Aliyun API %s returned HTTP %s: %s", path, resp.status, text[:200]
+                    )
+                    return None
 
-                # If token expired/invalid (401, 460, 20621, etc.)
+                resp_json = await resp.json(content_type=None)
+                if not isinstance(resp_json, dict):
+                    return None
+
+                code = resp_json.get("code")
                 if code in (401, 460, 20621) and retry_on_auth_fail:
-                    _LOGGER.warning("Token expired (code %s), forcing refresh and retrying...", code)
-                    refreshed = await self.async_check_or_refresh_token(force=True)
+                    _LOGGER.warning(
+                        "Token expired (code %s), forcing refresh and retrying...", code
+                    )
+                    refreshed = await self.async_check_or_refresh_token(
+                        force=True, failed_token=used_token
+                    )
                     if refreshed:
-                        return await self._async_request(path, api_ver, params, retry_on_auth_fail=False)
+                        return await self._async_request(
+                            path, api_ver, params, retry_on_auth_fail=False
+                        )
 
                 return resp_json
         except Exception as err:
             _LOGGER.error("Aliyun API request to %s failed: %s", path, err)
             return None
+
+    async def async_get_alcs_access_info(self) -> dict[str, str] | None:
+        """Fetch local ALCS accessKey/accessToken once from Aliyun Cloud and cache them."""
+        if not self.iot_id or not self.has_credentials:
+            return None
+
+        resp = await self._async_request(
+            path="/alcs/device/accessInfo/get",
+            api_ver="1.0.0",
+            params={"iotIdList": [self.iot_id]},
+        )
+        if not resp or resp.get("code") != 200:
+            _LOGGER.warning("Failed to fetch ALCS local access info: %s", resp)
+            return None
+
+        data = resp.get("data")
+        dto_list = data.get("alcsDeviceDTOList") if isinstance(data, dict) else None
+        if not isinstance(dto_list, list) or not dto_list:
+            return None
+
+        info = dto_list[0]
+        if not isinstance(info, dict):
+            return None
+
+        access_key = info.get("accessKey")
+        access_token = info.get("accessToken")
+        if not access_key or not access_token:
+            return None
+
+        self._alcs_access_key = access_key
+        self._alcs_access_token = access_token
+        if info.get("productKey"):
+            self.product_key = info["productKey"]
+        if info.get("deviceName"):
+            self.device_name = info["deviceName"]
+
+        await self.async_save_storage()
+        _LOGGER.info(
+            "Fetched and persisted ALCS local accessKey for device %s",
+            self.device_name or self.iot_id,
+        )
+        return {
+            "accessKey": access_key,
+            "accessToken": access_token,
+            "productKey": self.product_key,
+            "deviceName": self.device_name,
+        }
 
     async def async_get_properties(self) -> dict[str, Any] | None:
         """Fetch all properties for the oven."""
@@ -235,8 +421,8 @@ class DepelecCloudClient:
             api_ver="1.0.4",
             params={"iotId": self.iot_id},
         )
-        if resp and resp.get("code") == 200:
-            return resp.get("data")
+        if resp and resp.get("code") == 200 and isinstance(resp.get("data"), dict):
+            return resp["data"]
         return None
 
     async def async_set_properties(self, items: dict[str, Any]) -> bool:
