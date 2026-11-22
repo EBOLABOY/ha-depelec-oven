@@ -4,9 +4,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import voluptuous as vol
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.typing import ConfigType
 
@@ -23,6 +26,42 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.BUTTON,
 ]
+
+OVEN_CONFIG_SCHEMA = vol.Schema(
+    {
+        vol.Optional(const.CONF_HOST, default=const.DEFAULT_HOST): cv.string,
+        vol.Optional(const.CONF_PORT, default=const.DEFAULT_PORT): cv.port,
+        vol.Optional(
+            const.CONF_SCAN_INTERVAL, default=const.DEFAULT_SCAN_INTERVAL
+        ): cv.positive_int,
+        vol.Optional(const.CONF_IOT_ID, default=const.DEFAULT_IOT_ID): cv.string,
+        vol.Optional(
+            const.CONF_DEVICE_NAME, default=const.DEFAULT_DEVICE_NAME
+        ): cv.string,
+        vol.Optional(
+            const.CONF_PRODUCT_KEY, default=const.DEFAULT_PRODUCT_KEY
+        ): cv.string,
+        vol.Optional(const.CONF_APP_KEY, default=const.DEFAULT_APP_KEY): cv.string,
+        vol.Optional(
+            const.CONF_APP_SECRET, default=const.DEFAULT_APP_SECRET
+        ): cv.string,
+        vol.Optional(
+            const.CONF_IDENTITY_ID, default=const.DEFAULT_IDENTITY_ID
+        ): cv.string,
+        vol.Optional(
+            const.CONF_INITIAL_IOT_TOKEN, default=const.DEFAULT_INITIAL_IOT_TOKEN
+        ): cv.string,
+        vol.Optional(
+            const.CONF_INITIAL_REFRESH_TOKEN,
+            default=const.DEFAULT_INITIAL_REFRESH_TOKEN,
+        ): cv.string,
+    }
+)
+
+CONFIG_SCHEMA = vol.Schema(
+    {vol.Optional(const.DOMAIN): OVEN_CONFIG_SCHEMA},
+    extra=vol.ALLOW_EXTRA,
+)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
